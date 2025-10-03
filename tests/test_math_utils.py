@@ -1,4 +1,4 @@
-from math_utils import add, multiply
+from math_utils.math_utils import add, multiply
 
 
 def test_add():
@@ -9,4 +9,3 @@ def test_add():
 def test_multiply():
     assert multiply(2, 3) == 6
     assert multiply(-1, 5) == -5
-
