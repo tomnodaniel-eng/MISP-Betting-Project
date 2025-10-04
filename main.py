@@ -3,6 +3,20 @@ import os
 
 app = FastAPI(title="MISP Betting API")
 
+@app.get("/data/test")
+def data_test():
+    """Test if data directory is accessible"""
+    import os
+    try:
+        files = os.listdir('data/historical')
+        return {
+            "data_directory_exists": os.path.exists('data'),
+            "historical_files": files,
+            "file_count": len(files)
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/")
 def read_root():
     return {"message": "MISP Betting API is running on Render!"}
