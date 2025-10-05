@@ -78,12 +78,51 @@ async def get_historical_data(season: str):
 
 @app.get("/data/current-odds")
 async def get_current_odds():
-    # Your existing odds code here
     try:
-        # Example structure - replace with your actual odds loading
-        data = {"odds": [], "timestamp": datetime.now().isoformat()}
-        return data
+        api_key = os.getenv('ODDS_API_KEY')
+        
+        if not api_key:
+            return {
+                "error": "ODDS_API_KEY environment variable not set",
+                "odds": [],
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Make real API call to TheOddsAPI
+        import requests
+        
+        # Get upcoming odds for soccer competitions
+        url = "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
+        params = {
+            'apiKey': api_key,
+            'regions': 'uk',  # UK bookmakers
+            'markets': 'h2h',  # Head-to-head markets
+            'oddsFormat': 'decimal'
+        }
+        
+        response = requests.get(url, params=params)
+        
+        if response.status_code == 200:
+            odds_data = response.json()
+            return {
+                "odds": odds_data,
+                "timestamp": datetime.now().isoformat(),
+                "api_status": "success",
+                "events_count": len(odds_data)
+            }
+        else:
+            return {
+                "error": f"API request failed with status {response.status_code}",
+                "api_response": response.text,
+                "odds": [],
+                "timestamp": datetime.now().isoformat()
+            }
+            
     except Exception as e:
-        return {"error": str(e)}
+        return {
+            "error": str(e),
+            "odds": [],
+            "timestamp": datetime.now().isoformat()
+        }
 
 # Add any other routes you have below...
