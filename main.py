@@ -5,8 +5,9 @@ from data_collector import DataCollector
 from datetime import datetime
 import math
 import json
-import psycopg2
-from psycopg2.extras import RealDictCursor
+from sqlalchemy import create_engine, MetaData, Table, Column, String, Integer, Float, DateTime, Text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
 # ===== NaN FIX =====
 class NaNSafeJSONEncoder(json.JSONEncoder):
@@ -22,123 +23,105 @@ class NaNSafeJSONEncoder(json.JSONEncoder):
 app = FastAPI(title="MISP Betting API")
 app.json_encoder = NaNSafeJSONEncoder  # Apply the NaN fix
 
-# ===== DATABASE CONNECTION =====
-def get_db_connection():
-    """Get database connection"""
-    try:
-        conn = psycopg2.connect(
-            os.getenv('DATABASE_URL'),
-            cursor_factory=RealDictCursor
-        )
-        return conn
-    except Exception as e:
-        print(f"Database connection error: {e}")
-        return None
+# ===== DATABASE SETUP (SQLAlchemy) =====
+DATABASE_URL = os.getenv('DATABASE_URL')
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 
-# ===== DATABASE INITIALIZATION =====
+# Synchronous engine for table creation
+sync_engine = create_engine(DATABASE_URL.replace("+asyncpg", ""))
+Base = declarative_base()
+
+# Define Tables
+class RawFixture(Base):
+    __tablename__ = 'raw_fixtures'
+    fixture_id = Column(String(50), primary_key=True)
+    sport_type = Column(String(20), nullable=False)
+    league = Column(String(50), nullable=False)
+    home_team = Column(String(100), nullable=False)
+    away_team = Column(String(100), nullable=False)
+    fixture_date = Column(DateTime, nullable=False)
+    season = Column(String(10), nullable=False)
+    status = Column(String(20), default='upcoming')
+    home_score = Column(Integer)
+    away_score = Column(Integer)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class RawOddsSnapshot(Base):
+    __tablename__ = 'raw_odds_snapshots'
+    snapshot_id = Column(Integer, primary_key=True, autoincrement=True)
+    fixture_id = Column(String(50))
+    bookmaker = Column(String(50), nullable=False)
+    market_type = Column(String(20), nullable=False)
+    home_odds = Column(Float(8,3))
+    away_odds = Column(Float(8,3))
+    draw_odds = Column(Float(8,3))
+    snapshot_timestamp = Column(DateTime, nullable=False)
+    last_update = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class EngineeredFeature(Base):
+    __tablename__ = 'engineered_features'
+    feature_id = Column(Integer, primary_key=True, autoincrement=True)
+    fixture_id = Column(String(50))
+    home_form_last_5 = Column(Float(5,3))
+    away_form_last_5 = Column(Float(5,3))
+    home_goals_avg = Column(Float(5,2))
+    away_goals_avg = Column(Float(5,2))
+    h2h_home_wins = Column(Integer)
+    h2h_away_wins = Column(Integer)
+    h2h_draws = Column(Integer)
+    implied_prob_home = Column(Float(5,4))
+    implied_prob_away = Column(Float(5,4))
+    implied_prob_draw = Column(Float(5,4))
+    value_indicator = Column(Float(6,4))
+    feature_timestamp = Column(DateTime, default=datetime.utcnow)
+
+class ModelPrediction(Base):
+    __tablename__ = 'model_predictions'
+    prediction_id = Column(Integer, primary_key=True, autoincrement=True)
+    fixture_id = Column(String(50))
+    model_version = Column(String(20), nullable=False)
+    predicted_outcome = Column(String(10))
+    confidence = Column(Float(5,4))
+    predicted_prob_home = Column(Float(5,4))
+    predicted_prob_away = Column(Float(5,4))
+    predicted_prob_draw = Column(Float(5,4))
+    recommended_stake = Column(Float(6,2))
+    expected_value = Column(Float(6,4))
+    prediction_timestamp = Column(DateTime, default=datetime.utcnow)
+
+class BettingLedger(Base):
+    __tablename__ = 'betting_ledger'
+    bet_id = Column(Integer, primary_key=True, autoincrement=True)
+    fixture_id = Column(String(50))
+    prediction_id = Column(Integer)
+    bet_type = Column(String(20), nullable=False)
+    selection = Column(String(50), nullable=False)
+    odds = Column(Float(8,3), nullable=False)
+    stake = Column(Float(8,2), nullable=False)
+    potential_return = Column(Float(8,2))
+    bet_status = Column(String(20), default='placed')
+    actual_result = Column(String(50))
+    profit_loss = Column(Float(8,2))
+    bet_timestamp = Column(DateTime, default=datetime.utcnow)
+    settled_timestamp = Column(DateTime)
+
 def init_database():
     """Initialize database tables"""
-    conn = get_db_connection()
-    if not conn:
-        return {"status": "error", "message": "Database connection failed"}
-    
     try:
-        cur = conn.cursor()
-        
-        # Create tables
-        tables_sql = """
-        CREATE TABLE IF NOT EXISTS raw_fixtures (
-            fixture_id VARCHAR(50) PRIMARY KEY,
-            sport_type VARCHAR(20) NOT NULL,
-            league VARCHAR(50) NOT NULL,
-            home_team VARCHAR(100) NOT NULL,
-            away_team VARCHAR(100) NOT NULL,
-            fixture_date TIMESTAMP NOT NULL,
-            season VARCHAR(10) NOT NULL,
-            status VARCHAR(20) DEFAULT 'upcoming',
-            home_score INTEGER,
-            away_score INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS raw_odds_snapshots (
-            snapshot_id SERIAL PRIMARY KEY,
-            fixture_id VARCHAR(50) REFERENCES raw_fixtures(fixture_id),
-            bookmaker VARCHAR(50) NOT NULL,
-            market_type VARCHAR(20) NOT NULL,
-            home_odds DECIMAL(8,3),
-            away_odds DECIMAL(8,3),
-            draw_odds DECIMAL(8,3),
-            snapshot_timestamp TIMESTAMP NOT NULL,
-            last_update TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS engineered_features (
-            feature_id SERIAL PRIMARY KEY,
-            fixture_id VARCHAR(50) REFERENCES raw_fixtures(fixture_id),
-            home_form_last_5 DECIMAL(5,3),
-            away_form_last_5 DECIMAL(5,3),
-            home_goals_avg DECIMAL(5,2),
-            away_goals_avg DECIMAL(5,2),
-            h2h_home_wins INTEGER,
-            h2h_away_wins INTEGER,
-            h2h_draws INTEGER,
-            implied_prob_home DECIMAL(5,4),
-            implied_prob_away DECIMAL(5,4),
-            implied_prob_draw DECIMAL(5,4),
-            value_indicator DECIMAL(6,4),
-            feature_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS model_predictions (
-            prediction_id SERIAL PRIMARY KEY,
-            fixture_id VARCHAR(50) REFERENCES raw_fixtures(fixture_id),
-            model_version VARCHAR(20) NOT NULL,
-            predicted_outcome VARCHAR(10),
-            confidence DECIMAL(5,4),
-            predicted_prob_home DECIMAL(5,4),
-            predicted_prob_away DECIMAL(5,4),
-            predicted_prob_draw DECIMAL(5,4),
-            recommended_stake DECIMAL(6,2),
-            expected_value DECIMAL(6,4),
-            prediction_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS betting_ledger (
-            bet_id SERIAL PRIMARY KEY,
-            fixture_id VARCHAR(50) REFERENCES raw_fixtures(fixture_id),
-            prediction_id INTEGER REFERENCES model_predictions(prediction_id),
-            bet_type VARCHAR(20) NOT NULL,
-            selection VARCHAR(50) NOT NULL,
-            odds DECIMAL(8,3) NOT NULL,
-            stake DECIMAL(8,2) NOT NULL,
-            potential_return DECIMAL(8,2),
-            bet_status VARCHAR(20) DEFAULT 'placed',
-            actual_result VARCHAR(50),
-            profit_loss DECIMAL(8,2),
-            bet_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            settled_timestamp TIMESTAMP
-        );
-        """
-        
-        cur.execute(tables_sql)
-        conn.commit()
+        Base.metadata.create_all(sync_engine)
         return {"status": "success", "message": "Database tables created"}
-        
     except Exception as e:
-        conn.rollback()
         return {"status": "error", "message": str(e)}
-    finally:
-        conn.close()
 
 # Ensure data directory exists on startup
 os.makedirs('data/historical', exist_ok=True)
 
 # Initialize database on startup
 @app.on_event("startup")
-async def startup_event():
+def startup_event():
     """Initialize database when app starts"""
     print("Initializing database...")
     result = init_database()
@@ -151,10 +134,13 @@ def read_root():
 @app.get("/health")
 def health_check():
     db_url = os.getenv('DATABASE_URL')
-    conn = get_db_connection()
-    db_connected = conn is not None
-    if conn:
-        conn.close()
+    try:
+        # Test database connection
+        with sync_engine.connect() as conn:
+            conn.execute("SELECT 1")
+        db_connected = True
+    except:
+        db_connected = False
     
     return {
         "status": "healthy",
@@ -164,30 +150,25 @@ def health_check():
 
 # ===== DATABASE ENDPOINTS =====
 @app.get("/data/db-health")
-async def db_health_check():
+def db_health_check():
     """Check database connectivity and version"""
     try:
-        conn = get_db_connection()
-        if not conn:
-            return {"database": "error", "message": "Connection failed"}
-        
-        cur = conn.cursor()
-        cur.execute("SELECT version();")
-        db_version = cur.fetchone()
-        cur.execute("SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = 'public';")
-        table_count = cur.fetchone()
-        conn.close()
+        with sync_engine.connect() as conn:
+            result = conn.execute("SELECT version();")
+            db_version = result.scalar()
+            result = conn.execute("SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = 'public';")
+            table_count = result.scalar()
         
         return {
             "database": "connected", 
-            "version": db_version['version'],
-            "tables_count": table_count['table_count']
+            "version": db_version,
+            "tables_count": table_count
         }
     except Exception as e:
         return {"database": "error", "message": str(e)}
 
 @app.post("/data/init-database")
-async def initialize_database():
+def initialize_database():
     """Manually initialize database tables"""
     result = init_database()
     if result["status"] == "error":
@@ -195,24 +176,19 @@ async def initialize_database():
     return result
 
 @app.get("/data/tables")
-async def list_tables():
+def list_tables():
     """List all tables in the database"""
     try:
-        conn = get_db_connection()
-        if not conn:
-            return {"error": "Database connection failed"}
+        with sync_engine.connect() as conn:
+            result = conn.execute("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public'
+                ORDER BY table_name;
+            """)
+            tables = [row[0] for row in result]
         
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public'
-            ORDER BY table_name;
-        """)
-        tables = cur.fetchall()
-        conn.close()
-        
-        return {"tables": [table['table_name'] for table in tables]}
+        return {"tables": tables}
     except Exception as e:
         return {"error": str(e)}
 
@@ -289,5 +265,3 @@ async def get_current_odds():
             "odds": [],
             "timestamp": datetime.now().isoformat()
         }
-
-# Add any other routes you have below...
