@@ -1,13 +1,11 @@
 from fastapi import FastAPI, HTTPException
 import os
 import pandas as pd
-from data_collector import DataCollector
 from datetime import datetime
 import math
 import json
-from sqlalchemy import create_engine, MetaData, Table, Column, String, Integer, Float, DateTime, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+import sqlite3
+from pathlib import Path
 
 # ===== NaN FIX =====
 class NaNSafeJSONEncoder(json.JSONEncoder):
@@ -21,98 +19,112 @@ class NaNSafeJSONEncoder(json.JSONEncoder):
 # ===== END NaN FIX =====
 
 app = FastAPI(title="MISP Betting API")
-app.json_encoder = NaNSafeJSONEncoder  # Apply the NaN fix
+app.json_encoder = NaNSafeJSONEncoder
 
-# ===== DATABASE SETUP (SQLAlchemy) =====
-DATABASE_URL = os.getenv('DATABASE_URL')
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+# ===== SIMPLE SQLITE DATABASE =====
+DB_PATH = "misp_betting.db"
 
-# Synchronous engine for table creation
-sync_engine = create_engine(DATABASE_URL.replace("+asyncpg", ""))
-Base = declarative_base()
-
-# Define Tables
-class RawFixture(Base):
-    __tablename__ = 'raw_fixtures'
-    fixture_id = Column(String(50), primary_key=True)
-    sport_type = Column(String(20), nullable=False)
-    league = Column(String(50), nullable=False)
-    home_team = Column(String(100), nullable=False)
-    away_team = Column(String(100), nullable=False)
-    fixture_date = Column(DateTime, nullable=False)
-    season = Column(String(10), nullable=False)
-    status = Column(String(20), default='upcoming')
-    home_score = Column(Integer)
-    away_score = Column(Integer)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-class RawOddsSnapshot(Base):
-    __tablename__ = 'raw_odds_snapshots'
-    snapshot_id = Column(Integer, primary_key=True, autoincrement=True)
-    fixture_id = Column(String(50))
-    bookmaker = Column(String(50), nullable=False)
-    market_type = Column(String(20), nullable=False)
-    home_odds = Column(Float(8,3))
-    away_odds = Column(Float(8,3))
-    draw_odds = Column(Float(8,3))
-    snapshot_timestamp = Column(DateTime, nullable=False)
-    last_update = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class EngineeredFeature(Base):
-    __tablename__ = 'engineered_features'
-    feature_id = Column(Integer, primary_key=True, autoincrement=True)
-    fixture_id = Column(String(50))
-    home_form_last_5 = Column(Float(5,3))
-    away_form_last_5 = Column(Float(5,3))
-    home_goals_avg = Column(Float(5,2))
-    away_goals_avg = Column(Float(5,2))
-    h2h_home_wins = Column(Integer)
-    h2h_away_wins = Column(Integer)
-    h2h_draws = Column(Integer)
-    implied_prob_home = Column(Float(5,4))
-    implied_prob_away = Column(Float(5,4))
-    implied_prob_draw = Column(Float(5,4))
-    value_indicator = Column(Float(6,4))
-    feature_timestamp = Column(DateTime, default=datetime.utcnow)
-
-class ModelPrediction(Base):
-    __tablename__ = 'model_predictions'
-    prediction_id = Column(Integer, primary_key=True, autoincrement=True)
-    fixture_id = Column(String(50))
-    model_version = Column(String(20), nullable=False)
-    predicted_outcome = Column(String(10))
-    confidence = Column(Float(5,4))
-    predicted_prob_home = Column(Float(5,4))
-    predicted_prob_away = Column(Float(5,4))
-    predicted_prob_draw = Column(Float(5,4))
-    recommended_stake = Column(Float(6,2))
-    expected_value = Column(Float(6,4))
-    prediction_timestamp = Column(DateTime, default=datetime.utcnow)
-
-class BettingLedger(Base):
-    __tablename__ = 'betting_ledger'
-    bet_id = Column(Integer, primary_key=True, autoincrement=True)
-    fixture_id = Column(String(50))
-    prediction_id = Column(Integer)
-    bet_type = Column(String(20), nullable=False)
-    selection = Column(String(50), nullable=False)
-    odds = Column(Float(8,3), nullable=False)
-    stake = Column(Float(8,2), nullable=False)
-    potential_return = Column(Float(8,2))
-    bet_status = Column(String(20), default='placed')
-    actual_result = Column(String(50))
-    profit_loss = Column(Float(8,2))
-    bet_timestamp = Column(DateTime, default=datetime.utcnow)
-    settled_timestamp = Column(DateTime)
+def get_db_connection():
+    """Get SQLite database connection"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_database():
-    """Initialize database tables"""
+    """Initialize SQLite database tables"""
     try:
-        Base.metadata.create_all(sync_engine)
-        return {"status": "success", "message": "Database tables created"}
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Create tables
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS raw_fixtures (
+                fixture_id TEXT PRIMARY KEY,
+                sport_type TEXT NOT NULL,
+                league TEXT NOT NULL,
+                home_team TEXT NOT NULL,
+                away_team TEXT NOT NULL,
+                fixture_date TIMESTAMP NOT NULL,
+                season TEXT NOT NULL,
+                status TEXT DEFAULT 'upcoming',
+                home_score INTEGER,
+                away_score INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS raw_odds_snapshots (
+                snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fixture_id TEXT,
+                bookmaker TEXT NOT NULL,
+                market_type TEXT NOT NULL,
+                home_odds REAL,
+                away_odds REAL,
+                draw_odds REAL,
+                snapshot_timestamp TIMESTAMP NOT NULL,
+                last_update TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS engineered_features (
+                feature_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fixture_id TEXT,
+                home_form_last_5 REAL,
+                away_form_last_5 REAL,
+                home_goals_avg REAL,
+                away_goals_avg REAL,
+                h2h_home_wins INTEGER,
+                h2h_away_wins INTEGER,
+                h2h_draws INTEGER,
+                implied_prob_home REAL,
+                implied_prob_away REAL,
+                implied_prob_draw REAL,
+                value_indicator REAL,
+                feature_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS model_predictions (
+                prediction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fixture_id TEXT,
+                model_version TEXT NOT NULL,
+                predicted_outcome TEXT,
+                confidence REAL,
+                predicted_prob_home REAL,
+                predicted_prob_away REAL,
+                predicted_prob_draw REAL,
+                recommended_stake REAL,
+                expected_value REAL,
+                prediction_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS betting_ledger (
+                bet_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fixture_id TEXT,
+                prediction_id INTEGER,
+                bet_type TEXT NOT NULL,
+                selection TEXT NOT NULL,
+                odds REAL NOT NULL,
+                stake REAL NOT NULL,
+                potential_return REAL,
+                bet_status TEXT DEFAULT 'placed',
+                actual_result TEXT,
+                profit_loss REAL,
+                bet_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                settled_timestamp TIMESTAMP
+            )
+        """)
+        
+        conn.commit()
+        conn.close()
+        return {"status": "success", "message": "SQLite database tables created"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -123,7 +135,7 @@ os.makedirs('data/historical', exist_ok=True)
 @app.on_event("startup")
 def startup_event():
     """Initialize database when app starts"""
-    print("Initializing database...")
+    print("Initializing SQLite database...")
     result = init_database()
     print(f"Database init: {result}")
 
@@ -133,36 +145,29 @@ def read_root():
 
 @app.get("/health")
 def health_check():
-    db_url = os.getenv('DATABASE_URL')
-    try:
-        # Test database connection
-        with sync_engine.connect() as conn:
-            conn.execute("SELECT 1")
-        db_connected = True
-    except:
-        db_connected = False
-    
+    db_exists = Path(DB_PATH).exists()
     return {
         "status": "healthy",
-        "database_connected": db_connected,
-        "environment": "production"
+        "database_connected": db_exists,
+        "environment": "production",
+        "database_type": "SQLite"
     }
 
 # ===== DATABASE ENDPOINTS =====
 @app.get("/data/db-health")
 def db_health_check():
-    """Check database connectivity and version"""
+    """Check database connectivity"""
     try:
-        with sync_engine.connect() as conn:
-            result = conn.execute("SELECT version();")
-            db_version = result.scalar()
-            result = conn.execute("SELECT COUNT(*) as table_count FROM information_schema.tables WHERE table_schema = 'public';")
-            table_count = result.scalar()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = [row[0] for row in cursor.fetchall()]
+        conn.close()
         
         return {
             "database": "connected", 
-            "version": db_version,
-            "tables_count": table_count
+            "tables_count": len(tables),
+            "tables": tables
         }
     except Exception as e:
         return {"database": "error", "message": str(e)}
@@ -179,14 +184,11 @@ def initialize_database():
 def list_tables():
     """List all tables in the database"""
     try:
-        with sync_engine.connect() as conn:
-            result = conn.execute("""
-                SELECT table_name 
-                FROM information_schema.tables 
-                WHERE table_schema = 'public'
-                ORDER BY table_name;
-            """)
-            tables = [row[0] for row in result]
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;")
+        tables = [row[0] for row in cursor.fetchall()]
+        conn.close()
         
         return {"tables": tables}
     except Exception as e:
