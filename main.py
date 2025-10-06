@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import os
 import pandas as pd
 from datetime import datetime
@@ -86,12 +87,15 @@ class SimpleETL:
             # Read CSV file
             df = pd.read_csv(file_path)
             
+            # Clean NaN values before returning
+            df_cleaned = df.where(pd.notnull(df), None)
+            
             # Get basic info
             file_info = {
                 "file": file_path,
                 "rows": len(df),
                 "columns": list(df.columns),
-                "sample_data": df.head(2).to_dict('records')  # First 2 rows as sample
+                "sample_data": df_cleaned.head(2).to_dict('records')  # First 2 rows as sample
             }
             
             return file_info
@@ -105,7 +109,7 @@ class SimpleETL:
             files = self.discover_files()
             results = []
             
-            for file_path in files[:3]:  # Process only first 3 files to avoid timeout
+            for file_path in files[:2]:  # Process only first 2 files to avoid timeout
                 result = self.process_single_file(file_path)
                 results.append(result)
             
@@ -122,15 +126,17 @@ class SimpleETL:
 # Initialize ETL
 etl_processor = SimpleETL()
 
-# ===== ETL ENDPOINTS =====
+# ===== ETL ENDPOINTS WITH NaN FIX =====
 @app.post("/etl/historical-fixtures")
 async def run_historical_etl():
-    """Simple ETL endpoint that analyzes files without heavy processing"""
+    """Simple ETL endpoint that analyzes files with NaN protection"""
     try:
         result = etl_processor.run_simple_etl()
-        return result
+        # Use JSONResponse with custom encoder to handle NaN values
+        return JSONResponse(content=result, encoder=NaNSafeJSONEncoder)
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        error_result = {"status": "error", "message": str(e)}
+        return JSONResponse(content=error_result, encoder=NaNSafeJSONEncoder)
 
 @app.get("/etl/status")
 async def get_etl_status():
@@ -138,14 +144,16 @@ async def get_etl_status():
     try:
         files = etl_processor.discover_files()
         
-        return {
+        result = {
             "status": "ready",
             "available_files": files,
             "total_files": len(files),
             "message": "ETL system ready for analysis"
         }
+        return JSONResponse(content=result, encoder=NaNSafeJSONEncoder)
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        error_result = {"status": "error", "message": str(e)}
+        return JSONResponse(content=error_result, encoder=NaNSafeJSONEncoder)
 
 @app.get("/fixtures/count")
 async def get_fixtures_count():
