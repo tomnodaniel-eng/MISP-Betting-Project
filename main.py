@@ -180,8 +180,17 @@ async def data_health():
 async def get_odds():
     """Fetch current odds from TheOddsAPI"""
     try:
+        # Get API key from environment variable with fallback
+        API_KEY = os.getenv("ODDS_API_KEY", "77d4e7a1f17fcbb5d4c1f7a553daca15")
+        
+        if not API_KEY or API_KEY == "your_api_key_here":
+            return {
+                "status": "error",
+                "message": "API key not configured. Please set ODDS_API_KEY environment variable.",
+                "timestamp": datetime.now().isoformat()
+            }
+        
         # API configuration
-        API_KEY = "77d4e7a1f17fcbb5d4c1f7a553daca15"
         SPORT = "basketball_nba"
         REGIONS = "us"
         MARKETS = "h2h"
@@ -201,16 +210,24 @@ async def get_odds():
         # Make API request
         response = requests.get(url, params=params)
         
-        if response.status_code != 200:
+        if response.status_code == 401:
+            return {
+                "status": "error",
+                "message": "Invalid API key. Please check your ODDS_API_KEY environment variable.",
+                "response_text": response.text,
+                "timestamp": datetime.now().isoformat()
+            }
+        elif response.status_code != 200:
             return {
                 "status": "error",
                 "message": f"API request failed with status {response.status_code}",
-                "response_text": response.text
+                "response_text": response.text,
+                "timestamp": datetime.now().isoformat()
             }
         
         odds_data = response.json()
         
-        # Store in database
+        # Store in database (optional - you can remove this if you just want to test)
         conn = get_db_connection()
         cursor = conn.cursor()
         
@@ -243,8 +260,9 @@ async def get_odds():
         return {
             "status": "success",
             "message": f"Retrieved {len(odds_data)} games",
-            "data": odds_data,
-            "timestamp": datetime.now().isoformat()
+            "games_count": len(odds_data),
+            "timestamp": datetime.now().isoformat(),
+            "data_preview": odds_data[:2] if odds_data else []  # Return first 2 games as preview
         }
         
     except Exception as e:
@@ -256,6 +274,7 @@ async def get_odds():
 
 # ===== SIMPLE ETL ENDPOINTS =====
 @app.post("/etl/historical-fixtures")
+@app.get("/etl/historical-fixtures")  # Add GET method for testing
 async def run_historical_etl():
     """Simple ETL that returns success without processing"""
     try:
