@@ -20,11 +20,31 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-# Initialize DATA-02 tables
+# ===== ENVIRONMENT VARIABLE STATUS =====
+def get_env_status():
+    """Check which environment variables are set"""
+    env_vars = {
+        'DATABASE_URL': os.getenv('DATABASE_URL'),
+        'POSTGRES_URL': os.getenv('POSTGRES_URL'), 
+        'ODDS_API_KEY': os.getenv('ODDS_API_KEY')
+    }
+    
+    status = {}
+    for key, value in env_vars.items():
+        status[key] = {
+            'set': value is not None,
+            'length': len(value) if value else 0,
+            'preview': value[:20] + '...' if value and len(value) > 20 else value
+        }
+    
+    return status
+
+# ===== DATA-02 CORE SCHEMA =====
 def init_tables():
+    """Initialize all DATA-02 tables in SQLite"""
     conn = get_db()
     
-    # Core DATA-02 tables
+    # 1. raw_fixtures
     conn.execute('''
         CREATE TABLE IF NOT EXISTS raw_fixtures (
             fixture_id TEXT PRIMARY KEY,
@@ -35,10 +55,13 @@ def init_tables():
             fixture_date TIMESTAMP NOT NULL,
             season TEXT NOT NULL,
             status TEXT DEFAULT 'upcoming',
+            home_score INTEGER,
+            away_score INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
+    # 2. raw_odds_snapshots
     conn.execute('''
         CREATE TABLE IF NOT EXISTS raw_odds_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,16 +76,23 @@ def init_tables():
         )
     ''')
     
+    # 3. engineered_features
     conn.execute('''
         CREATE TABLE IF NOT EXISTS engineered_features (
             feature_id INTEGER PRIMARY KEY AUTOINCREMENT,
             fixture_id TEXT,
             home_form_last_5 REAL,
             away_form_last_5 REAL,
+            home_goals_avg REAL,
+            away_goals_avg REAL,
+            h2h_home_wins INTEGER,
+            h2h_away_wins INTEGER,
+            h2h_draws INTEGER,
             feature_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
+    # 4. model_predictions
     conn.execute('''
         CREATE TABLE IF NOT EXISTS model_predictions (
             prediction_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,10 +100,14 @@ def init_tables():
             model_version TEXT NOT NULL,
             predicted_outcome TEXT,
             confidence REAL,
+            predicted_prob_home REAL,
+            predicted_prob_away REAL,
+            predicted_prob_draw REAL,
             prediction_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
+    # 5. betting_ledger
     conn.execute('''
         CREATE TABLE IF NOT EXISTS betting_ledger (
             bet_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,19 +116,25 @@ def init_tables():
             selection TEXT NOT NULL,
             odds REAL NOT NULL,
             stake REAL NOT NULL,
+            potential_return REAL,
             bet_status TEXT DEFAULT 'placed',
+            actual_result TEXT,
+            profit_loss REAL,
             bet_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
-    # Legacy table
+    # Legacy table for compatibility
     conn.execute('''
         CREATE TABLE IF NOT EXISTS odds_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sport_key TEXT,
+            sport_title TEXT,
+            commence_time TEXT,
             home_team TEXT,
             away_team TEXT,
             bookmaker TEXT,
+            market_key TEXT,
             outcome_name TEXT,
             price REAL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -108,23 +148,27 @@ init_tables()
 
 @app.get("/")
 async def root():
+    env_status = get_env_status()
     return {
-        "message": "MISP Betting API - DATA-02 Ready",
+        "message": "MISP Betting API - DATA-02 Complete",
         "database": "sqlite",
-        "environment": "clean",
+        "environment_variables": env_status,
         "timestamp": datetime.now().isoformat()
     }
 
 @app.get("/health")
 async def health():
+    env_status = get_env_status()
     return {
         "status": "healthy",
         "database": "sqlite",
+        "environment_variables": env_status,
         "timestamp": datetime.now().isoformat()
     }
 
 @app.post("/data/init-schema")
 async def init_schema():
+    """Initialize DATA-02 schema - POST method only"""
     init_tables()
     return {
         "status": "success",
@@ -227,6 +271,17 @@ async def schema_status():
     
     conn.close()
     return {"status": "success", "data": status, "timestamp": datetime.now().isoformat()}
+
+@app.get("/config/environment")
+async def get_environment():
+    """Show current environment variable status"""
+    env_status = get_env_status()
+    return {
+        "status": "success",
+        "environment_variables": env_status,
+        "database": "sqlite",
+        "timestamp": datetime.now().isoformat()
+    }
 
 @app.get("/etl/status")
 async def etl_status():
