@@ -3,9 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
 import requests
 import os
-import pandas as pd
+import csv
+import io
 from datetime import datetime
-from data_sources.football_data_uk import FootballDataUK
 
 app = FastAPI(title="MISP Betting API")
 
@@ -290,8 +290,84 @@ async def etl_status():
     return {"status": "ready", "timestamp": datetime.now().isoformat()}
 
 # =============================================================================
-# FOOTBALL DATA UK ETL ENDPOINTS - DATA-03 Implementation
+# FOOTBALL DATA UK ETL (No pandas required - using csv module)
 # =============================================================================
+
+class FootballDataUK:
+    def __init__(self):
+        self.base_url = "https://www.football-data.co.uk/mmz4281"
+        self.leagues = {
+            'EPL': 'E0',
+            'Championship': 'E1', 
+            'La_Liga': 'SP1',
+            'Bundesliga': 'D1',
+            'Serie_A': 'I1',
+            'Ligue_1': 'F1'
+        }
+    
+    def get_season_code(self, year):
+        """Convert year to football-data.co.uk season code"""
+        return f"{str(year)[2:4]}{str(year+1)[2:4]}"
+    
+    def download_season_data(self, league, season_year):
+        """Download CSV data for a specific league and season"""
+        season_code = self.get_season_code(season_year)
+        league_code = self.leagues.get(league)
+        
+        if not league_code:
+            raise ValueError(f"Unknown league: {league}. Available: {list(self.leagues.keys())}")
+        
+        url = f"{self.base_url}/{season_code}/{league_code}.csv"
+        print(f"Downloading from: {url}")
+        
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            
+            # Parse CSV data
+            csv_data = response.text
+            reader = csv.DictReader(io.StringIO(csv_data))
+            rows = list(reader)
+            
+            if not rows:
+                print(f"Warning: Empty data for {league} {season_year}")
+                return None
+                
+            print(f"Successfully downloaded {len(rows)} rows for {league} {season_year}")
+            return rows
+            
+        except requests.exceptions.RequestException as e:
+            print(f"HTTP Error downloading {league} {season_year}: {e}")
+            return None
+        except Exception as e:
+            print(f"Error processing {league} {season_year}: {e}")
+            return None
+    
+    def get_available_leagues(self):
+        """Return list of available leagues"""
+        return list(self.leagues.keys())
+    
+    def test_connection(self):
+        """Test connection by downloading a small sample"""
+        try:
+            test_data = self.download_season_data('EPL', 2023)
+            if test_data is not None and len(test_data) > 0:
+                return {
+                    "status": "success",
+                    "message": "Successfully connected to Football-Data.co.uk",
+                    "sample_columns": list(test_data[0].keys())[:10],
+                    "data_rows": len(test_data)
+                }
+            else:
+                return {
+                    "status": "error", 
+                    "message": "Connected but no data returned"
+                }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Connection failed: {str(e)}"
+            }
 
 @app.get("/etl/test-football-data")
 async def test_football_data():
@@ -307,9 +383,9 @@ async def test_football_data():
         
         if sample_data is not None:
             sample_info = {
-                "shape": sample_data.shape,
-                "columns": list(sample_data.columns),
-                "first_few_rows": sample_data[['Date', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG']].head(3).to_dict('records')
+                "row_count": len(sample_data),
+                "columns": list(sample_data[0].keys()) if sample_data else [],
+                "first_few_rows": sample_data[:3] if sample_data else []
             }
         else:
             sample_info = {"error": "No data downloaded"}
@@ -330,31 +406,48 @@ async def download_historical_data(league: str, season_year: int):
         fd = FootballDataUK()
         
         # Download data
-        raw_df = fd.download_season_data(league, season_year)
-        if raw_df is None:
+        raw_data = fd.download_season_data(league, season_year)
+        if raw_data is None:
             return {"error": f"Failed to download data for {league} {season_year}"}
         
         # Transform and load data
         conn = get_db()
         inserted_count = 0
         
-        for _, row in raw_df.iterrows():
+        for row in raw_data:
             try:
-                # Convert date format from DD/MM/YY to YYYY-MM-DD
-                fixture_date = row['Date']
+                # Extract and convert date
+                date_str = row.get('Date', '')
+                if not date_str:
+                    continue
+                    
+                # Simple date conversion (you might need to adjust this based on the actual format)
                 try:
-                    # Try parsing the date
-                    fixture_date = pd.to_datetime(fixture_date, format='%d/%m/%y').strftime('%Y-%m-%d')
+                    # Try DD/MM/YY format
+                    day, month, year = date_str.split('/')
+                    if len(year) == 2:
+                        year = '20' + year  # Convert YY to YYYY
+                    fixture_date = f"{year}-{month}-{day}"
                 except:
-                    # If that fails, try another common format
-                    try:
-                        fixture_date = pd.to_datetime(fixture_date).strftime('%Y-%m-%d')
-                    except:
-                        print(f"Skipping row with invalid date: {fixture_date}")
-                        continue
+                    # If conversion fails, skip this row
+                    continue
                 
                 # Create fixture_id for soccer data
-                fixture_id = f"soccer_{league}_{fixture_date}_{row['HomeTeam']}_vs_{row['AwayTeam']}".replace(' ', '_')
+                home_team = row.get('HomeTeam', '')
+                away_team = row.get('AwayTeam', '')
+                fixture_id = f"soccer_{league}_{fixture_date}_{home_team}_vs_{away_team}".replace(' ', '_')
+                
+                # Extract scores
+                home_score = row.get('FTHG', '')  # Full Time Home Goals
+                away_score = row.get('FTAG', '')  # Full Time Away Goals
+                
+                # Convert scores to integers if possible
+                try:
+                    home_score_int = int(home_score) if home_score and home_score.strip() else None
+                    away_score_int = int(away_score) if away_score and away_score.strip() else None
+                except:
+                    home_score_int = None
+                    away_score_int = None
                 
                 # Insert into raw_fixtures table
                 conn.execute('''
@@ -365,13 +458,13 @@ async def download_historical_data(league: str, season_year: int):
                     fixture_id,
                     'soccer',
                     league,
-                    row['HomeTeam'],
-                    row['AwayTeam'],
+                    home_team,
+                    away_team,
                     fixture_date,
                     str(season_year),
                     'FT',  # Full Time - historical games are completed
-                    int(row['FTHG']) if pd.notna(row['FTHG']) else None,
-                    int(row['FTAG']) if pd.notna(row['FTAG']) else None
+                    home_score_int,
+                    away_score_int
                 ))
                 
                 if conn.total_changes > 0:
@@ -389,7 +482,7 @@ async def download_historical_data(league: str, season_year: int):
             "league": league,
             "season": season_year,
             "fixtures_loaded": inserted_count,
-            "total_rows_downloaded": len(raw_df)
+            "total_rows_downloaded": len(raw_data)
         }
         
     except Exception as e:

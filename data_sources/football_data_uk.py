@@ -1,7 +1,6 @@
 # data_sources/football_data_uk.py
-import pandas as pd
 import requests
-from datetime import datetime
+import csv
 import io
 import time
 
@@ -18,9 +17,7 @@ class FootballDataUK:
         }
     
     def get_season_code(self, year):
-        """Convert year to football-data.co.uk season code
-        Example: 2022 -> 2223 (for 2022-2023 season)
-        """
+        """Convert year to football-data.co.uk season code"""
         return f"{str(year)[2:4]}{str(year+1)[2:4]}"
     
     def download_season_data(self, league, season_year):
@@ -35,22 +32,22 @@ class FootballDataUK:
         print(f"Downloading from: {url}")
         
         try:
-            # Add a small delay to be respectful to the server
-            time.sleep(1)
+            time.sleep(1)  # Be respectful to the server
             
             response = requests.get(url, timeout=30)
             response.raise_for_status()
             
-            # Read CSV into pandas
-            df = pd.read_csv(io.StringIO(response.text))
+            # Parse CSV data without pandas
+            csv_data = response.text
+            reader = csv.DictReader(io.StringIO(csv_data))
+            rows = list(reader)
             
-            # Basic validation
-            if df.empty:
-                print(f"Warning: Empty DataFrame for {league} {season_year}")
+            if not rows:
+                print(f"Warning: Empty data for {league} {season_year}")
                 return None
                 
-            print(f"Successfully downloaded {len(df)} rows for {league} {season_year}")
-            return df
+            print(f"Successfully downloaded {len(rows)} rows for {league} {season_year}")
+            return rows
             
         except requests.exceptions.RequestException as e:
             print(f"HTTP Error downloading {league} {season_year}: {e}")
@@ -66,14 +63,13 @@ class FootballDataUK:
     def test_connection(self):
         """Test connection by downloading a small sample"""
         try:
-            # Try to download current season EPL data
-            test_df = self.download_season_data('EPL', 2023)
-            if test_df is not None and not test_df.empty:
+            test_data = self.download_season_data('EPL', 2023)
+            if test_data is not None and len(test_data) > 0:
                 return {
                     "status": "success",
                     "message": "Successfully connected to Football-Data.co.uk",
-                    "sample_columns": list(test_df.columns)[:10],  # First 10 columns
-                    "data_shape": test_df.shape
+                    "sample_columns": list(test_data[0].keys())[:10],
+                    "data_rows": len(test_data)
                 }
             else:
                 return {
@@ -85,22 +81,3 @@ class FootballDataUK:
                 "status": "error",
                 "message": f"Connection failed: {str(e)}"
             }
-
-# Example usage
-if __name__ == "__main__":
-    # Test the class
-    fd = FootballDataUK()
-    
-    print("Available leagues:", fd.get_available_leagues())
-    
-    # Test connection
-    test_result = fd.test_connection()
-    print("Connection test:", test_result)
-    
-    # Download sample data
-    sample_data = fd.download_season_data('EPL', 2023)
-    if sample_data is not None:
-        print(f"Sample data shape: {sample_data.shape}")
-        print("Columns:", list(sample_data.columns))
-        print("\nFirst 3 rows:")
-        print(sample_data[['Date', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG']].head(3))
